@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
+	"math"
+	"strconv"
 	"sync"
 	"time"
 
@@ -59,6 +62,9 @@ type Bar struct {
 	// Width is the width of the progress bar
 	Width int
 
+	// UnitFormatter transforms the Current() value to the given unit string
+	UnitFormatter UnitFormatter
+
 	// timeElased is the time elapsed for the progress
 	timeElapsed time.Duration
 	current     int
@@ -72,16 +78,20 @@ type Bar struct {
 // DecoratorFunc is a function that can be prepended and appended to the progress bar
 type DecoratorFunc func(b *Bar) string
 
+// UnitFormatter formats the current value to a string representation with units
+type UnitFormatter func(int) string
+
 // NewBar returns a new progress bar
 func NewBar(total int) *Bar {
 	return &Bar{
-		Total:    total,
-		Width:    Width,
-		LeftEnd:  LeftEnd,
-		RightEnd: RightEnd,
-		Head:     Head,
-		Fill:     Fill,
-		Empty:    Empty,
+		Total:         total,
+		Width:         Width,
+		LeftEnd:       LeftEnd,
+		RightEnd:      RightEnd,
+		Head:          Head,
+		Fill:          Fill,
+		Empty:         Empty,
+		UnitFormatter: DefaultFormatter,
 
 		mtx: &sync.RWMutex{},
 	}
@@ -174,7 +184,11 @@ func (b *Bar) PrependElapsed() *Bar {
 
 // Bytes returns the byte presentation of the progress bar
 func (b *Bar) Bytes() []byte {
-	completedWidth := int(float64(b.Width) * (b.CompletedPercent() / 100.00))
+	var completedWidth int = 0
+	if b.Current() > 0 {
+		completedWidth = int(float64(b.Width) * (b.CompletedPercent() / 100.00))
+	}
+	//completedWidth := int(float64(b.Width) * (float64(b.Current()) / float64(b.Total)))
 
 	// add fill and empty bits
 	var buf bytes.Buffer
@@ -234,4 +248,65 @@ func (b *Bar) TimeElapsed() time.Duration {
 // TimeElapsedString returns the formatted string represenation of the time elapsed
 func (b *Bar) TimeElapsedString() string {
 	return strutil.PrettyTime(b.TimeElapsed())
+}
+
+func (b *Bar) ReadUpdater(input io.Reader) io.Reader {
+	return &ReadProgressor{
+		bar:   b,
+		input: input,
+	}
+
+}
+
+func (b *Bar) FormattedCurrent() string {
+	return b.UnitFormatter(b.Current())
+}
+func (b *Bar) FormattedTotal() string {
+	return b.UnitFormatter(b.Total)
+}
+
+type ReadProgressor struct {
+	bar   *Bar
+	input io.Reader
+}
+
+func (p *ReadProgressor) Read(into []byte) (int, error) {
+	amt, err := p.input.Read(into)
+	if err == io.EOF {
+		p.bar.Set(p.bar.Total)
+		return amt, err
+	} else if err != nil {
+		return amt, err
+	}
+
+	err = p.bar.Set(p.bar.Current() + amt)
+	if err != nil {
+		return amt, fmt.Errorf("progress bar failure: %s", err)
+	}
+	return amt, nil
+}
+
+func DefaultFormatter(val int) string {
+	return strconv.Itoa(val)
+}
+
+func BytesFormatter(val int) string {
+	if val < 0 {
+		return "0"
+	}
+
+	lg2 := math.Log2(float64(val))
+	magn := uint(lg2 / 10.0)
+	switch magn {
+	case 0:
+		return fmt.Sprintf("%dB", val)
+	case 1:
+		return fmt.Sprintf("%.2fKiB", float64(val)/float64(1024))
+	case 2:
+		return fmt.Sprintf("%.2fMiB", float64(val)/float64(1024*1024))
+	case 3:
+		return fmt.Sprintf("%.2fGiB", float64(val)/float64(1024*1024*1024))
+	default:
+		return fmt.Sprintf("%.2fTiB", float64(val)/float64(1024*1024*1024*1024))
+	}
 }
